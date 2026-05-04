@@ -6,8 +6,8 @@ let dots        = [];          // { x: pct, y: pct }
 let imageLoaded = false;
 
 // Student state
-let hoveredIdx  = null;        // index of dot whose x-column is under the cursor
-let lockedIdxs  = [];          // 0, 1, or 2 locked dot indices
+let hoveredIdx  = null;
+let lockedIdxs  = [];
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 let elCanvasWrap, elDotLayer, elSheetImg, elEmptyState,
@@ -87,16 +87,19 @@ function loadImage(e) {
 }
 
 // ── Mouse events ──────────────────────────────────────────────────────────────
+let lastMove = 0;
 function handleMouseMove(e) {
-  if (!imageLoaded) return;
+  if (!imageLoaded || mode !== 'student') return;
 
-  if (mode === 'student') {
-    var rect  = elCanvasWrap.getBoundingClientRect();
-    var xPct  = (e.clientX - rect.left) / rect.width;
-    hoveredIdx = nearestDotIndex(xPct);
-    renderAll();
-    return;
-  }
+  const now = performance.now();
+  if (now - lastMove < 16) return; // ~60fps throttle
+  lastMove = now;
+
+  var rect  = elCanvasWrap.getBoundingClientRect();
+  var xPct  = (e.clientX - rect.left) / rect.width;
+
+  hoveredIdx = nearestDotIndex(xPct);
+  renderAll();
 }
 
 function handleMouseLeave() {
@@ -128,10 +131,8 @@ function handleCanvasClick(e) {
     if (idx === null) return;
 
     if (lockedIdxs.length >= 2) {
-      // 3rd click — reset
       lockedIdxs = [idx];
     } else if (lockedIdxs.length === 1 && lockedIdxs[0] === idx) {
-      // clicking the same dot again — deselect
       lockedIdxs = [];
     } else {
       lockedIdxs.push(idx);
@@ -143,17 +144,19 @@ function handleCanvasClick(e) {
 }
 
 // ── Nearest dot by x-coordinate ───────────────────────────────────────────────
-// Returns the index of the dot whose x is closest to xPct,
-// within a threshold of 3% of canvas width.
 function nearestDotIndex(xPct) {
   if (dots.length === 0) return null;
+
   var best     = null;
   var bestDist = Infinity;
-  var THRESHOLD = 0.03;
+
+  var THRESHOLD = Math.min(0.03, 1 / (dots.length * 2));
+
   dots.forEach(function (d, i) {
     var dist = Math.abs(d.x - xPct);
     if (dist < bestDist) { bestDist = dist; best = i; }
   });
+
   return bestDist <= THRESHOLD ? best : null;
 }
 
@@ -197,34 +200,36 @@ function updateStudentStatus() {
   }
 }
 
-// ── Compute extrapolated indices ──────────────────────────────────────────────
-function getExtrapolatedIndices() {
+// ── Spatial extrapolation (NEW, more accurate) ────────────────────────────────
+function getExtrapolatedXPositions() {
   if (lockedIdxs.length < 2) return [];
-  var a        = lockedIdxs[0];
-  var b        = lockedIdxs[1];
-  var interval = Math.abs(b - a);
-  if (interval === 0) return [];
+
+  var a = lockedIdxs[0];
+  var b = lockedIdxs[1];
+
+  var x1 = dots[a].x;
+  var x2 = dots[b].x;
+  var dx = x2 - x1;
+
+  if (dx === 0) return [];
 
   var results = [];
-  // Walk forward and backward from the lower of the two
-  var base = Math.min(a, b);
 
-  // Backward from base
-  var i = base - interval;
-  while (i >= 0) { results.push(i); i -= interval; }
+  // forward
+  var x = x2 + dx;
+  while (x <= 1) {
+    results.push(x);
+    x += dx;
+  }
 
-  // Forward from base (skipping the two selections themselves — they're drawn separately)
-  i = base;
-  while (i < dots.length) { results.push(i); i += interval; }
+  // backward
+  x = x1 - dx;
+  while (x >= 0) {
+    results.push(x);
+    x -= dx;
+  }
 
-  // Deduplicate and exclude the two locked ones
-  var locked = new Set(lockedIdxs);
-  var unique  = new Set(results);
-  var out     = [];
-  unique.forEach(function (v) {
-    if (!locked.has(v) && v >= 0 && v < dots.length) out.push(v);
-  });
-  return out;
+  return results;
 }
 
 // ── Render ────────────────────────────────────────────────────────────────────
@@ -246,6 +251,7 @@ function renderProfessorDots() {
     el.style.left  = (d.x * 100) + '%';
     el.style.top   = (d.y * 100) + '%';
     el.title       = 'Beat ' + (i + 1) + ' — click to remove';
+
     el.addEventListener('click', (function (index) {
       return function (ev) {
         ev.stopPropagation();
@@ -259,6 +265,7 @@ function renderProfessorDots() {
         renderAll();
       };
     })(i));
+
     elDotLayer.appendChild(el);
   });
 }
@@ -266,21 +273,20 @@ function renderProfessorDots() {
 function renderStudentLines() {
   if (dots.length === 0) return;
 
-  var extraIdxs = getExtrapolatedIndices();
-  var extraSet  = new Set(extraIdxs);
+  var xs = getExtrapolatedXPositions();
   var lockedSet = new Set(lockedIdxs);
 
-  // Draw auto-extrapolated lines first (behind everything)
-  extraIdxs.forEach(function (idx) {
-    appendVLine(dots[idx].x, 'auto');
+  // auto lines
+  xs.forEach(function (x) {
+    appendVLine(x, 'auto');
   });
 
-  // Draw the two locked lines
+  // locked
   if (lockedIdxs.length >= 1) appendVLine(dots[lockedIdxs[0]].x, 'sel-first');
   if (lockedIdxs.length >= 2) appendVLine(dots[lockedIdxs[1]].x, 'sel-second');
 
-  // Draw hover line last (topmost), only if not already locked
-  if (hoveredIdx !== null && !lockedSet.has(hoveredIdx) && !extraSet.has(hoveredIdx)) {
+  // hover
+  if (hoveredIdx !== null && !lockedSet.has(hoveredIdx)) {
     appendVLine(dots[hoveredIdx].x, 'hover');
   }
 }
